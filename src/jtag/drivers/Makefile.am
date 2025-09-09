@@ -210,6 +210,11 @@ endif
 if AM335XGPIO
 DRIVERFILES += %D%/am335xgpio.c
 endif
+if KLINK
+DRIVERFILES += %D%/klink.c
+DRIVERFILES += %D%/klink_usb_bulk.c
+%C%_libocdjtagdrivers_la_LIBADD += -lsetupapi
+endif
 if CH347
 DRIVERFILES += %D%/ch347.c
 endif

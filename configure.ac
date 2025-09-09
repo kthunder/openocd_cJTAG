@@ -129,6 +129,7 @@ m4_define([ADAPTER_OPT], [m4_translit(ADAPTER_ARG($1), [_], [-])])
 
 m4_define([USB1_ADAPTERS],
 	[[[ftdi], [MPSSE mode of FTDI based devices], [FTDI]],
+  [[klink], [KLINK devices], [KLINK]],
 	[[ch347], [Mode 3 of CH347 based devices], [CH347]],
 	[[stlink], [ST-Link Programmer], [HLADAPTER_STLINK]],
 	[[ti_icdi], [TI ICDI JTAG Programmer], [HLADAPTER_ICDI]],
@@ -358,6 +359,10 @@ AC_ARG_ENABLE([parport_giveio],
     AS_HELP_STRING([--enable-parport-giveio],
       [Enable use of giveio for parport (for CygWin only)]),
     [parport_use_giveio=$enableval], [parport_use_giveio=])
+
+AC_ARG_ENABLE([klink],
+  AS_HELP_STRING([--enable-klink], [Enable building support for KLINK]),
+  [build_klink=$enableval], [build_klink=no])
 
 AC_ARG_ENABLE([gw16012],
   AS_HELP_STRING([--enable-gw16012], [Enable building support for the Gateworks GW16012 JTAG Programmer]),
@@ -711,6 +716,12 @@ AS_IF([test "x$enable_esp_usb_jtag" != "xno"], [
   build_bitq=yes
 ])
 
+AS_IF([test "x$build_klink" = "xyes"], [
+  AC_DEFINE([BUILD_KLINK], [1], [1 if you want KLINK.])
+], [
+  AC_DEFINE([BUILD_KLINK], [0], [0 if you don't want KLINK.])
+])
+
 AM_CONDITIONAL([RELEASE], [test "x$build_release" = "xyes"])
 AM_CONDITIONAL([GIVEIO], [test "x$parport_use_giveio" = "xyes"])
 AM_CONDITIONAL([BITBANG], [test "x$build_bitbang" = "xyes"])
@@ -727,6 +738,7 @@ AM_CONDITIONAL([USE_LIBGPIOD], [test "x$use_libgpiod" = "xyes"])
 AM_CONDITIONAL([USE_HIDAPI], [test "x$use_hidapi" = "xyes"])
 AM_CONDITIONAL([USE_LIBJAYLINK], [test "x$use_libjaylink" = "xyes"])
 AM_CONDITIONAL([HAVE_CAPSTONE], [test "x$enable_capstone" != "xno"])
+AM_CONDITIONAL([KLINK], [test "x$build_klink" = "xyes"])
 
 AM_CONDITIONAL([INTERNAL_JIMTCL], [test "x$use_internal_jimtcl" = "xyes"])
 AM_CONDITIONAL([HAVE_JIMTCL_PKG_CONFIG], [test "x$have_jimtcl_pkg_config" = "xyes"])

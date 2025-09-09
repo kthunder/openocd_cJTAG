@@ -1904,7 +1904,7 @@ static int riscv_run_algorithm(struct target *target, int num_mem_params,
 	LOG_DEBUG("resume at 0x%" TARGET_PRIxADDR, entry_point);
 	if (riscv_resume(target, false, entry_point, false, false, true) != ERROR_OK)
 		return ERROR_FAIL;
-
+		
 	int64_t start = timeval_ms();
 	while (target->state != TARGET_HALTED) {
 		LOG_DEBUG("poll()");

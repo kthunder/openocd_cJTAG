@@ -1237,7 +1237,7 @@ static int jtag_examine_chain(void)
 
 	/* Add room for end-of-chain marker. */
 	max_taps++;
-
+	max_taps = 1;
 	uint8_t *idcode_buffer = calloc(4, max_taps);
 	if (!idcode_buffer)
 		return ERROR_JTAG_INIT_FAILED;
@@ -1344,6 +1344,7 @@ out:
  */
 static int jtag_validate_ircapture(void)
 {
+	return ERROR_OK;
 	struct jtag_tap *tap;
 	uint8_t *ir_test = NULL;
 	struct scan_field field;

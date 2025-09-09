@@ -108,8 +108,10 @@ static void log_puts(enum log_levels level,
 		fflush(log_output);
 		return;
 	}
-
+	
+	f = file;
 	f = strrchr(file, '/');
+
 	if (f)
 		file = f + 1;
 

@@ -424,6 +424,14 @@ COMMAND_HANDLER(handle_adapter_list_command)
 	return CALL_COMMAND_HANDLER(dump_adapter_driver_list);
 }
 
+bool enable_cjtag;
+COMMAND_HANDLER(handle_adapter_enable_cJtag_command)
+{
+	LOG_DEBUG("enable cJTAG");
+	enable_cjtag = true;
+	return ERROR_OK;
+}
+
 COMMAND_HANDLER(handle_adapter_driver_command)
 {
 	int retval;
@@ -1136,6 +1144,13 @@ static const struct command_registration adapter_srst_command_handlers[] = {
 };
 
 static const struct command_registration adapter_command_handlers[] = {
+	{
+		.name = "enable_cJtag",
+		.handler = handle_adapter_enable_cJtag_command,
+		.mode = COMMAND_CONFIG,
+		.help = "enable cJtag",
+		.usage = "",
+	},
 	{
 		.name = "driver",
 		.handler = handle_adapter_driver_command,

@@ -121,8 +121,8 @@ $(THE_MANUAL): %.pdf: %.tex
 	-cd $$(dirname $*) && pdflatex $$(basename $*)
 
 TCL_PATH = tcl
-# command to find paths of script files, relative to TCL_PATH
-TCL_FILES = find $(srcdir)/$(TCL_PATH) -name '*.cfg' -o -name '*.tcl' -o -name '*.txt' | \
+# command to find paths of script files, relative to TCL_PATH TODO:konglei
+TCL_FILES = find $(srcdir)/$(TCL_PATH) -name 'klink.cfg' -o -name '*.tcl' -o -name '*.txt' | \
 		sed -e 's,^$(srcdir)/$(TCL_PATH),,'
 
 # The git log command below generates many empty text lines with only some space characters
