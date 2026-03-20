@@ -22,7 +22,7 @@
 # Usage:
 # export LIBUSB1_SRC=/path/to/libusb-1.0
 # export HIDAPI_SRC=/path/to/hidapi
-# export OPENOCD_CONFIG="--enable-..."
+export OPENOCD_CONFIG="--enable-klink --enable-static --disable-shared --disable-doxygen-html --enable-remote-bitbang --enable-cmsis-dap --enable-jlink --disable-ftdi"
 # cd /work/dir
 # /path/to/openocd/contrib/cross-build.sh <host-triplet>
 #
@@ -34,28 +34,39 @@
 set -e -x
 
 WORK_DIR=$PWD
+mkdir -p $WORK_DIR/build
+
+export LIBUSB1_CONFIG="--enable-shared=no --enable-static=yes"
+export HIDAPI_CONFIG="--enable-shared=no --enable-static=yes --disable-testgui"
+export LIBFTDI_CONFIG="-DBUILD_SHARED_LIBS=OFF -DSTATICLIBS=ON -DEXAMPLES=OFF -DFTDI_EEPROM=OFF -DBUILD_TESTS=OFF -DFTDIPP=OFF"
+export CAPSTONE_CONFIG="CAPSTONE_BUILD_CORE_ONLY=yes CAPSTONE_STATIC=yes CAPSTONE_SHARED=no"
+export LIBJAYLINK_CONFIG="--disable-shared"
+export JIMTCL_CONFIG="--disable-shared"
 
 ## Source code paths, customize as necessary
-: ${OPENOCD_SRC:="`dirname "$0"`/.."}
-: ${LIBUSB1_SRC:=/path/to/libusb1}
-: ${HIDAPI_SRC:=/path/to/hidapi}
-: ${LIBFTDI_SRC:=/path/to/libftdi}
-: ${CAPSTONE_SRC:=/path/to/capstone}
-: ${LIBJAYLINK_SRC:=/path/to/libjaylink}
-: ${JIMTCL_SRC:=/path/to/jimtcl}
+:    ${OPENOCD_SRC:="`dirname "$0"`/.."}
+:    ${LIBUSB1_SRC:=$OPENOCD_SRC/../libusb-1.0.26}
+:     ${HIDAPI_SRC:=$OPENOCD_SRC/../hidapi-hidapi-0.13.1}
+:    ${CONFUSE_SRC:=$OPENOCD_SRC/../confuse-3.3}
+:    ${LIBFTDI_SRC:=$OPENOCD_SRC/../libftdi1-1.5}
+:   ${CAPSTONE_SRC:=$OPENOCD_SRC/../capstone-4.0.2}
+: ${LIBJAYLINK_SRC:=$OPENOCD_SRC/../libjaylink-0.3.1}
+:     ${JIMTCL_SRC:=$OPENOCD_SRC/../jimtcl-0.83}
 
 OPENOCD_SRC=`readlink -m $OPENOCD_SRC`
 LIBUSB1_SRC=`readlink -m $LIBUSB1_SRC`
 HIDAPI_SRC=`readlink -m $HIDAPI_SRC`
+CONFUSE_SRC=`readlink -m $CONFUSE_SRC`
 LIBFTDI_SRC=`readlink -m $LIBFTDI_SRC`
 CAPSTONE_SRC=`readlink -m $CAPSTONE_SRC`
 LIBJAYLINK_SRC=`readlink -m $LIBJAYLINK_SRC`
 JIMTCL_SRC=`readlink -m $JIMTCL_SRC`
 
 HOST_TRIPLET=$1
-BUILD_DIR=$WORK_DIR/$HOST_TRIPLET-build
+BUILD_DIR=$WORK_DIR/build/$HOST_TRIPLET-build
 LIBUSB1_BUILD_DIR=$BUILD_DIR/libusb1
 HIDAPI_BUILD_DIR=$BUILD_DIR/hidapi
+CONFUSE_BUILD_DIR=$BUILD_DIR/confuse
 LIBFTDI_BUILD_DIR=$BUILD_DIR/libftdi
 CAPSTONE_BUILD_DIR=$BUILD_DIR/capstone
 LIBJAYLINK_BUILD_DIR=$BUILD_DIR/libjaylink
@@ -63,22 +74,22 @@ JIMTCL_BUILD_DIR=$BUILD_DIR/jimtcl
 OPENOCD_BUILD_DIR=$BUILD_DIR/openocd
 
 ## Root of host file tree
-SYSROOT=$WORK_DIR/$HOST_TRIPLET-root
+SYSROOT=$WORK_DIR/build/$HOST_TRIPLET-root
 
 ## Install location within host file tree
 : ${PREFIX=/usr}
 
 ## Make parallel jobs
-: ${MAKE_JOBS:=1}
+: ${MAKE_JOBS:=12}
 
 ## OpenOCD-only install dir for packaging
 : ${OPENOCD_TAG:=`git --git-dir=$OPENOCD_SRC/.git describe --tags`}
-PACKAGE_DIR=$WORK_DIR/openocd_${OPENOCD_TAG}_${HOST_TRIPLET}
+PACKAGE_DIR=$WORK_DIR/build/openocd_${OPENOCD_TAG}_${HOST_TRIPLET}
 
 #######
 
 # Create pkg-config wrapper and make sure it's used
-export PKG_CONFIG=$WORK_DIR/$HOST_TRIPLET-pkg-config
+export PKG_CONFIG=$WORK_DIR/build/$HOST_TRIPLET-pkg-config
 
 cat > $PKG_CONFIG <<EOF
 #!/bin/sh
@@ -99,7 +110,7 @@ EOF
 chmod +x $PKG_CONFIG
 
 # Clear out work dir
-rm -rf $SYSROOT $BUILD_DIR
+# rm -rf $SYSROOT $BUILD_DIR
 mkdir -p $SYSROOT
 
 # libusb-1.0 build & install into sysroot
@@ -124,6 +135,17 @@ if [ -d $HIDAPI_SRC ] ; then
   make install DESTDIR=$SYSROOT
 fi
 
+# confuse build & install into sysroot
+if [ -d $CONFUSE_SRC ] ; then
+  mkdir -p $CONFUSE_BUILD_DIR
+  cd $CONFUSE_BUILD_DIR
+  $CONFUSE_SRC/configure --host=$HOST_TRIPLET \
+    --with-sysroot=$SYSROOT --prefix=$PREFIX --disable-udev --disable-examples \
+    $CONFUSE_CONFIG
+  make -j $MAKE_JOBS
+  make install DESTDIR=$SYSROOT
+fi
+
 # libftdi build & install into sysroot
 if [ -d $LIBFTDI_SRC ] ; then
   mkdir -p $LIBFTDI_BUILD_DIR
@@ -139,7 +161,7 @@ if [ -d $LIBFTDI_SRC ] ; then
 
   cmake $LIBFTDI_CONFIG \
     -DCMAKE_TOOLCHAIN_FILE=${LIBFTDI_SRC}/cmake/Toolchain-${HOST_TRIPLET}.cmake \
-    -DCMAKE_INSTALL_PREFIX=${PREFIX} \
+    -DCMAKE_INSTALL_PREFIX=${PREFIX} -DEXAMPLES=0 \
     -DPKG_CONFIG_EXECUTABLE=`which pkg-config` \
     $LIBFTDI_SRC
   make install DESTDIR=$SYSROOT
@@ -188,15 +210,20 @@ if [ -d $JIMTCL_SRC ] ; then
 fi
 
 # OpenOCD build & install into sysroot
-mkdir -p $OPENOCD_BUILD_DIR
-cd $OPENOCD_BUILD_DIR
-$OPENOCD_SRC/configure --build=`$OPENOCD_SRC/config.guess` --host=$HOST_TRIPLET \
---with-sysroot=$SYSROOT --prefix=$PREFIX \
-$OPENOCD_CONFIG
-make -j $MAKE_JOBS
-make install-strip DESTDIR=$SYSROOT
-
-# Separate OpenOCD install w/o dependencies. OpenOCD will have to be linked
-# statically or have dependencies packaged/installed separately.
-make install-strip DESTDIR=$PACKAGE_DIR
+if [ -d $OPENOCD_SRC ] ; then
+  mkdir -p $OPENOCD_BUILD_DIR
+  cd $OPENOCD_BUILD_DIR
+  $OPENOCD_SRC/configure --build=`$OPENOCD_SRC/config.guess` --host=$HOST_TRIPLET \
+    --with-sysroot=$SYSROOT --prefix=$PREFIX \
+    $OPENOCD_CONFIG
+  # bear -- make -j $MAKE_JOBS CFLAGS+="-Wno-error"
+  make -j $MAKE_JOBS CFLAGS+="-Wno-error"
+  make install-strip DESTDIR=$SYSROOT
+  # Separate OpenOCD install w/o dependencies. OpenOCD will have to be linked
+  # statically or have dependencies packaged/installed separately.
+  # make install-strip DESTDIR=$PACKAGE_DIR
+  # pwd
+  mkdir -p /mnt/c/Users/Administrator/Desktop/openocd
+  cp -r ../../i686-w64-mingw32-root/usr/* /mnt/c/Users/Administrator/Desktop/openocd
+fi
 

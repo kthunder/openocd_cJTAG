@@ -1304,3 +1304,182 @@ int image_calculate_checksum(const uint8_t *buffer, uint32_t nbytes, uint32_t *c
 	*checksum = crc;
 	return ERROR_OK;
 }
+
+// 直接定义 ELF 结构体和常量
+#ifndef ELF32_ST_TYPE
+#define ELF32_ST_TYPE(i) ((i) & 0xf)
+#endif
+
+#ifndef SHT_SYMTAB
+#define SHT_SYMTAB 2
+#endif
+
+#ifndef SHT_STRTAB
+#define SHT_STRTAB 3
+#endif
+
+// 如果没有 elf.h，直接定义需要的结构体
+#ifndef _ELF_H
+typedef struct {
+    uint32_t sh_name;
+    uint32_t sh_type;
+    uint32_t sh_flags;
+    uint32_t sh_addr;
+    uint32_t sh_offset;
+    uint32_t sh_size;
+    uint32_t sh_link;
+    uint32_t sh_info;
+    uint32_t sh_addralign;
+    uint32_t sh_entsize;
+} Elf32_Shdr;
+
+typedef struct {
+    uint32_t st_name;
+    uint32_t st_value;
+    uint32_t st_size;
+    uint8_t  st_info;
+    uint8_t  st_other;
+    uint16_t st_shndx;
+} Elf32_Sym;
+#endif
+
+static int image_elf32_find_symbol(struct image *image, const char *symbol_name, 
+                                  uint32_t *address, uint32_t *size)
+{
+    struct image_elf *elf = image->type_private;
+    
+    if (!elf->header32) {
+        return ERROR_FAIL;
+    }
+    
+    Elf32_Ehdr *header = elf->header32;
+    uint16_t shnum = field16(elf, header->e_shnum);
+    uint32_t shoff = field32(elf, header->e_shoff);
+    
+    if (shnum == 0 || shoff == 0) {
+        return ERROR_FAIL;
+    }
+    
+    // 读取节头表
+    Elf32_Shdr *sections = malloc(shnum * sizeof(Elf32_Shdr));
+    if (!sections) return ERROR_FAIL;
+    
+    int retval = fileio_seek(elf->fileio, shoff);
+    if (retval != ERROR_OK) {
+        free(sections);
+        return retval;
+    }
+    
+    size_t read_bytes;
+    retval = fileio_read(elf->fileio, shnum * sizeof(Elf32_Shdr), 
+                        (uint8_t*)sections, &read_bytes);
+    if (retval != ERROR_OK) {
+        free(sections);
+        return retval;
+    }
+    
+    // 查找符号表和字符串表
+    Elf32_Shdr *symtab = NULL, *strtab = NULL;
+    for (int i = 0; i < shnum; i++) {
+        uint32_t sh_type = field32(elf, sections[i].sh_type);
+        if (sh_type == SHT_SYMTAB) {
+            symtab = &sections[i];
+            uint32_t link = field32(elf, sections[i].sh_link);
+            if (link < shnum) {
+                strtab = &sections[link];
+            }
+            break;
+        }
+    }
+    
+    if (!symtab || !strtab) {
+        free(sections);
+        return ERROR_FAIL;
+    }
+    
+    // 读取字符串表
+    uint32_t strtab_size = field32(elf, strtab->sh_size);
+    char *strings = malloc(strtab_size);
+    if (!strings) {
+        free(sections);
+        return ERROR_FAIL;
+    }
+    
+    retval = fileio_seek(elf->fileio, field32(elf, strtab->sh_offset));
+    if (retval == ERROR_OK) {
+        retval = fileio_read(elf->fileio, strtab_size, (uint8_t*)strings, &read_bytes);
+    }
+    
+    if (retval != ERROR_OK) {
+        free(sections);
+        free(strings);
+        return retval;
+    }
+    
+    // 读取符号表
+    uint32_t symtab_size = field32(elf, symtab->sh_size);
+    int sym_count = symtab_size / sizeof(Elf32_Sym);
+    Elf32_Sym *symbols = malloc(symtab_size);
+    if (!symbols) {
+        free(sections);
+        free(strings);
+        return ERROR_FAIL;
+    }
+    
+    retval = fileio_seek(elf->fileio, field32(elf, symtab->sh_offset));
+    if (retval == ERROR_OK) {
+        retval = fileio_read(elf->fileio, symtab_size, (uint8_t*)symbols, &read_bytes);
+    }
+    
+    if (retval != ERROR_OK) {
+        free(sections);
+        free(strings);
+        free(symbols);
+        return retval;
+    }
+    
+    // 查找符号
+retval = ERROR_FAIL;
+for (int i = 0; i < sym_count; i++) {
+    uint32_t name_offset = field32(elf, symbols[i].st_name);
+    if (name_offset < strtab_size) {
+        const char *sym_name = &strings[name_offset];
+        if (strcmp(sym_name, symbol_name) == 0) {
+            // 添加更多调试信息
+            uint8_t st_info = symbols[i].st_info;
+            uint16_t st_shndx = field16(elf, symbols[i].st_shndx);
+            uint32_t sym_value = field32(elf, symbols[i].st_value);
+            uint32_t sym_size = field32(elf, symbols[i].st_size);
+            
+            // log_error("Symbol '%s': value=0x%08x, size=%d, info=0x%02x, shndx=%d", 
+            //             sym_name, sym_value, sym_size, st_info, st_shndx);
+            
+            *address = sym_value;  // 使用字节序转换后的值
+            *size = sym_size;      // 使用字节序转换后的值
+            retval = ERROR_OK;
+            break;
+        }
+    }
+}
+    
+    free(sections);
+    free(strings);
+    free(symbols);
+    return retval;
+}
+
+
+int image_find_symbol(struct image *image, const char *symbol_name, 
+                                uint32_t *address, uint32_t *size)
+{
+    if (image->type != IMAGE_ELF) {
+        return ERROR_FAIL;
+    }
+    
+    struct image_elf *elf = image->type_private;
+    if (!elf->is_64_bit) {
+        return image_elf32_find_symbol(image, symbol_name, address, size);
+    }
+    
+    return ERROR_FAIL;
+}

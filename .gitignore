@@ -58,6 +58,10 @@ src/openocd.exe
 
 # configure/autotools output
 /build-aux/
+/build/
+/i686-w64-mingw32-build/
+/i686-w64-mingw32-root/
+i686-w64-mingw32-pkg-config
 aclocal.m4
 autom4te.cache
 config.h

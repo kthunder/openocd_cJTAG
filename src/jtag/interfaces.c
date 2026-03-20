@@ -162,6 +162,9 @@ struct adapter_driver *adapter_drivers[] = {
 	&xlnx_pcie_xvc_adapter_driver,
 	&xlnx_axi_xvc_adapter_driver,
 #endif
+#if BUILD_KLINK == 1
+		&klink_adapter_driver,
+#endif
 
 		NULL,
 };
