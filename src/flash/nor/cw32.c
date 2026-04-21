@@ -124,6 +124,9 @@ static int cw32_erase(struct flash_bank *bank, unsigned int first,
 	uint32_t addr = bank->base + bank->sectors[first].offset;
 	uint32_t len = bank->sectors[last].offset + bank->sectors[last].size - bank->sectors[first].offset;
 
+	uint32_t flashIndex = (addr >= 0x01080000 ? 0 : 2);
+	retval = target_write_buffer(target, fls_algo_params.g_flashIndex&0xFFFFFFFF, 4, &flashIndex);
+
 	// log_info("run erase algo , target addr : 0x%08X len : 0x%04X", addr, len);
 	retval = target_write_buffer(target, fls_algo_params.g_dstAddress&0xFFFFFFFF, 4, &addr);
 	retval = target_write_buffer(target, fls_algo_params.g_length&0xFFFFFFFF, 4, &len);
@@ -232,6 +235,8 @@ static int cw32_write_block(struct flash_bank *bank,
 	 * The flash infrastructure ensures it, do just a security check
 	 */
 	assert(address % 4 == 0);
+	uint32_t flashIndex = (address >= 0x01080000 ? 0 : 2);
+	target_write_buffer(target, fls_algo_params.g_flashIndex&0xFFFFFFFF, 4, &flashIndex);
 
 	int retval;
 	retval = cw32_write_block_riscv(bank, buffer, address, words_count);
@@ -610,10 +615,6 @@ extern int image_find_symbol(struct image *image, const char *symbol_name,
 				"in %fs (%0.3f KiB/s)", image_size,
 				duration_elapsed(&bench), duration_kbps(&bench, image_size));
 	}
-
-
-	uint32_t flashIndex = 0;
-	retval = target_write_buffer(target, fls_algo_params.g_flashIndex&0xFFFFFFFF, 4, &flashIndex);
 	
 	retval = target_run_algorithm(target,
 								  0, NULL,
