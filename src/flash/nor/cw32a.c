@@ -281,21 +281,6 @@ struct cw32_property_addr
 	uint32_t flash_size;
 };
 
-static int cw32_get_property_addr(struct target *target, struct cw32_property_addr *addr)
-{
-	return ERROR_NOT_IMPLEMENTED;
-}
-
-static int cw32_get_device_id(struct flash_bank *bank, uint32_t *device_id)
-{
-	return ERROR_NOT_IMPLEMENTED;
-}
-
-static int cw32_get_flash_size(struct flash_bank *bank, uint16_t *flash_size_in_kb)
-{
-	return ERROR_NOT_IMPLEMENTED;
-}
-
 static int cw32_probe(struct flash_bank *bank)
 {
 	// log_info("%s", __func__);

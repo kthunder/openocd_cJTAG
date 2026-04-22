@@ -163,7 +163,7 @@ void log_hex(char * ucInfo, uint8_t * ucData, uint32_t len)
     for (size_t i = 0; i < len; i++)
     {
         printf("%02X", ucData[i]);
-        if ((i+1 == len) || ((i+1)%20 == 0))
+        if ((i+1 == len) || ((i+1)%0x20 == 0))
             printf("\n");
     }
 }
