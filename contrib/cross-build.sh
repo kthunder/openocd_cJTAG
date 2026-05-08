@@ -154,6 +154,9 @@ if [ -d $LIBFTDI_SRC ] ; then
   #   hint use : # export LIBUSB1_CONFIG="--enable-static ..."
   #   not needed since libftdi-1.5 when LIBFTDI_CONFIG="-DSTATICLIBS=OFF ..."
 
+  # Fix libftdi CMakeLists.txt: remove hardcoded SHARED to respect BUILD_SHARED_LIBS
+  sed -i 's/^add_library(ftdi1 SHARED \${c_sources})$/add_library(ftdi1 \${c_sources})/' ${LIBFTDI_SRC}/src/CMakeLists.txt
+
   # fix <toolchain>.cmake file
   ESCAPED_SYSROOT=$(printf '%s\n' "$SYSROOT" | sed -e 's/[\/&]/\\&/g')
   sed -i -E "s/(SET\(CMAKE_FIND_ROOT_PATH\s+).+\)/\1${ESCAPED_SYSROOT})/" \
