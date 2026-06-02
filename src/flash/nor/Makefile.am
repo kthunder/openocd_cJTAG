@@ -27,6 +27,8 @@ NOR_DRIVERS = \
 	%D%/cc3220sf.c \
 	%D%/cc26xx.c \
 	%D%/cfi.c \
+	%D%/cw32a.c \
+	%D%/cw32.c \
 	%D%/dsp5680xx_flash.c \
 	%D%/dw-spi.c \
 	%D%/efm32.c \
