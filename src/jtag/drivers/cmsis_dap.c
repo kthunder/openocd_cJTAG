@@ -1460,6 +1460,20 @@ static int cmsis_dap_init(void)
 		}
 	}
 
+	{
+		extern uint32_t ref_mv;
+		if (ref_mv>3300) ref_mv = 3300;
+		if (ref_mv<1500) ref_mv = 1500;
+		uint8_t *command = cmsis_dap_handle->command;
+
+		command[0] = 0x9D;
+		command[1] = ref_mv/100;
+		retval = cmsis_dap_xfer(cmsis_dap_handle, 2);
+		if (retval != ERROR_OK || cmsis_dap_handle->response[1] != DAP_OK)
+			goto init_err;
+		LOG_INFO("CMSIS-DAP: set vref %d mv", ref_mv);
+	}
+
 	extern bool enable_cjtag;
 	if (enable_cjtag) {
 		uint8_t *command = cmsis_dap_handle->command;
@@ -1467,7 +1481,7 @@ static int cmsis_dap_init(void)
 		command[0] = 0x9F;
 		command[1] = 1;
 
-		int retval = cmsis_dap_xfer(cmsis_dap_handle, 2);
+		retval = cmsis_dap_xfer(cmsis_dap_handle, 2);
 		if (retval != ERROR_OK || cmsis_dap_handle->response[1] != DAP_OK)
 			goto init_err;
 		LOG_INFO("CMSIS-DAP: enable cjtag");
