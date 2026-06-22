@@ -1345,8 +1345,10 @@ static int cmsis_dap_init(void)
 	if (retval != ERROR_OK)
 		return retval;
 
+	extern uint32_t ref_mv;
+	if (ref_mv)
 	{
-		extern uint32_t ref_mv;
+		
 		if (ref_mv>3300) ref_mv = 3300;
 		if (ref_mv<1500) ref_mv = 1500;
 		uint8_t *command = cmsis_dap_handle->command;

@@ -426,7 +426,7 @@ COMMAND_HANDLER(handle_adapter_list_command)
 }
 
 bool enable_cjtag;
-uint32_t ref_mv = 3300;
+uint32_t ref_mv = 0;
 COMMAND_HANDLER(handle_adapter_enable_cJtag_command)
 {
 	LOG_DEBUG("enable cJTAG");
