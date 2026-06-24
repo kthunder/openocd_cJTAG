@@ -118,7 +118,6 @@ static int cw32_erase(struct flash_bank *bank, unsigned int first,
 	struct target *target = bank->target;
 	if (!fls_algo_params.init) 
 	{
-		fls_algo_params.init = true;
 		cw32_load_fls_algo(bank);
 	}
 
@@ -270,7 +269,6 @@ static int cw32_write(struct flash_bank *bank, const uint8_t *buffer,
 	struct target *target = bank->target;
 	if (!fls_algo_params.init) 
 	{
-		fls_algo_params.init = true;
 		cw32_load_fls_algo(bank);
 	}
 	if (bank->target->state != TARGET_HALTED)
