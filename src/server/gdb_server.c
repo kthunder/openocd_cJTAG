@@ -3751,7 +3751,15 @@ static int gdb_input_inner(struct connection *connection)
 					/* handle extended restart packet */
 					gdb_restart_inferior(connection, packet, packet_size);
 					break;
-
+				case 'u':
+					if (!strcmp(packet, "ureset")) {
+						command_run_linef(connection->cmd_ctx, "reset halt");
+						gdb_put_packet(connection, "done", 4);
+					}
+					else{
+						gdb_put_packet(connection, "", 0);
+					}
+					break;
 				case 'j':
 					if (strncmp(packet, "jc", 2) == 0) {
 						/* DEPRECATED */
