@@ -3753,8 +3753,58 @@ static int gdb_input_inner(struct connection *connection)
 					break;
 				case 'u':
 					if (!strcmp(packet, "ureset")) {
+						struct target *target = get_target_from_connection(connection);
+
+						/*
+						 * After "reset halt", target memory is reinitialised
+						 * so software breakpoints (EBREAK written to RAM) and
+						 * hardware triggers are lost.  We must re-establish
+						 * them so that subsequent "continue" can hit the
+						 * breakpoints that GDB still believes are set.
+						 *
+						 * Strategy: mark every breakpoint / watchpoint as
+						 * "not set" BEFORE the reset, then re-program them
+						 * into the target AFTER the reset completes.
+						 * We do NOT call breakpoint_remove_all() because that
+						 * would free the structures — GDB still tracks them
+						 * on its side and would then be out of sync.
+						 */
+						for (struct breakpoint *bp = target->breakpoints;
+						     bp; bp = bp->next)
+							bp->is_set = false;
+						for (struct watchpoint *wp = target->watchpoints;
+						     wp; wp = wp->next)
+							wp->is_set = false;
+
 						command_run_linef(connection->cmd_ctx, "reset halt");
-						gdb_put_packet(connection, "done", 4);
+
+						/* Re-program all breakpoints into the freshly
+						 * reset target.  target_add_breakpoint() reads
+						 * the (now original) instruction, saves it, and
+						 * writes the EBREAK / configures the trigger. */
+						for (struct breakpoint *bp = target->breakpoints;
+						     bp; bp = bp->next) {
+							int retval = target_add_breakpoint(target, bp);
+							if (retval != ERROR_OK)
+								LOG_TARGET_WARNING(target,
+									"Failed to re-set breakpoint at "
+									TARGET_ADDR_FMT " after reset",
+									bp->address);
+						}
+						for (struct watchpoint *wp = target->watchpoints;
+						     wp; wp = wp->next) {
+							int retval = target_add_watchpoint(target, wp);
+							if (retval != ERROR_OK)
+								LOG_TARGET_WARNING(target,
+									"Failed to re-set watchpoint at "
+									TARGET_ADDR_FMT " after reset",
+									wp->address);
+						}
+
+						/* Send a proper GDB stop reply (T05 / SIGTRAP)
+						 * so GDB re-reads registers and displays source-
+						 * level code at the current PC. */
+						gdb_signal_reply(target, connection);
 					}
 					else{
 						gdb_put_packet(connection, "", 0);
