@@ -23,6 +23,7 @@
 #include "log.h"
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 #define MAX_CALLBACKS 32
@@ -57,6 +58,9 @@ static void stdout_callback(log_Event *ev)
     // 时间信息字符串
     char time_string[16];
     time_string[strftime(time_string, sizeof(time_string), "%H:%M:%S", ev->time)] = '\0';
+    char *f = strrchr(ev->file_name, '/');
+	if (f)
+		ev->file_name = f + 1;
 #ifdef LOG_USE_COLOR
     fprintf(ev->udata, "%s %s%-5s\x1b[0m \x1b[90m%s:%d:\x1b[0m ", time_string, level_colors[ev->level], level_strings[ev->level], ev->file_name, ev->line);
 #else

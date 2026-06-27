@@ -30,6 +30,7 @@
 
 #define PROGRAM_BKPT_OFFSET 0x08
 #define PROGRAM_ARGS_OFFSET 0x10
+#define SECTOR_SIZE 0x200  // 512 bytes sector size
 
 struct cw32_options
 {
@@ -52,6 +53,10 @@ struct fls_algo_param
     uint32_t g_flashIndex;
     uint32_t g_error;
     bool init;
+
+    uint8_t cached_sector[2][SECTOR_SIZE];
+    uint32_t cached_sector_addr[2];
+    bool cacheed_sector_valid[2];
 } fls_algo_params = {0};
 
 struct cw32_flash_bank
@@ -75,6 +80,7 @@ uint8_t flash_index=0;
 static int cw32_write_block(struct flash_bank *bank, const uint8_t *buffer,
                               uint32_t address, uint32_t hwords_count);
 static int cw32_load_fls_algo(struct flash_bank *bank);
+static int cw32_load_elf(struct flash_bank *bank, char *path, struct image *image);
 /* flash bank stm32x <base> <size> 0 0 <target#>
  */
 FLASH_BANK_COMMAND_HANDLER(cw32_flash_bank_command)
@@ -119,13 +125,31 @@ static int cw32_erase(struct flash_bank *bank, unsigned int first,
     uint32_t addr = bank->base + bank->sectors[first].offset;
     uint32_t len = bank->sectors[last].offset + bank->sectors[last].size - bank->sectors[first].offset;
 
-    uint32_t flashIndex = (addr >= 0x01080000 ? flash_index : 2);
-    retval = target_write_buffer(target, fls_algo_params.g_flashIndex&0xFFFFFFFF, 4, &flashIndex);
+    {
+        fls_algo_params.cached_sector_addr[0] = bank->base + bank->sectors[first].offset;
+        fls_algo_params.cached_sector_addr[1] = bank->base + bank->sectors[last].offset;
+        fls_algo_params.cacheed_sector_valid[0] = true;
+        fls_algo_params.cacheed_sector_valid[1] = true;
 
-    // log_info("run erase algo , target addr : 0x%08X len : 0x%04X", addr, len);
-    retval = target_write_buffer(target, fls_algo_params.g_dstAddress&0xFFFFFFFF, 4, &addr);
-    retval = target_write_buffer(target, fls_algo_params.g_length&0xFFFFFFFF, 4, &len);
-    retval = target_write_buffer(target, fls_algo_params.g_func&0xFFFFFFFF, 4, &func);
+        if(addr >= 0x01080000) {
+
+            target_read_buffer(target, fls_algo_params.cached_sector_addr[0] + ((flash_index-2)*0x20000), SECTOR_SIZE, fls_algo_params.cached_sector[0]);
+            target_read_buffer(target, fls_algo_params.cached_sector_addr[1] + ((flash_index-2)*0x20000), SECTOR_SIZE, fls_algo_params.cached_sector[1]);
+        }
+        else {
+            target_read_buffer(target, fls_algo_params.cached_sector_addr[0], SECTOR_SIZE, fls_algo_params.cached_sector[0]);
+            target_read_buffer(target, fls_algo_params.cached_sector_addr[1], SECTOR_SIZE, fls_algo_params.cached_sector[1]);
+        }
+    }
+
+    if (fls_algo_params.g_flashIndex != 0) {
+        uint32_t flashIndex = (addr >= 0x01080000 ? flash_index : 2);
+        target_write_buffer(target, fls_algo_params.g_flashIndex, 4, &flashIndex);
+    }
+
+    retval = target_write_buffer(target, fls_algo_params.g_dstAddress, 4, &addr);
+    retval = target_write_buffer(target, fls_algo_params.g_length, 4, &len);
+    retval = target_write_buffer(target, fls_algo_params.g_func, 4, &func);
 
     int64_t run_algo_start = timeval_ms();
     retval = target_run_algorithm(target,
@@ -151,68 +175,75 @@ static int cw32_protect(struct flash_bank *bank, int set, unsigned int first, un
     return ERROR_FLASH_OPER_UNSUPPORTED;
 }
 
+static int cw32_fls_algo_write(struct flash_bank *bank, const uint8_t *buffer, uint32_t address, uint32_t len)
+{
+    int retval = 0;
+    struct target *target = bank->target;
+    uint32_t func = 1;
+    retval = target_write_buffer(target, fls_algo_params.g_rwBuffer, len, buffer);
+    retval = target_write_buffer(target, fls_algo_params.g_func, 4, &func);
+    retval = target_write_buffer(target, fls_algo_params.g_dstAddress, 4, &address);
+    retval = target_write_buffer(target, fls_algo_params.g_length, 4, &len);
+    retval = target_run_algorithm(target,
+                                  0, NULL,
+                                  0, NULL,
+                                  fls_algo_params.__bkpt_label+2,
+                                  fls_algo_params.__bkpt_label,
+                                  10000, NULL);
+    return retval;
+}
+
 static int cw32_write_block_riscv(struct flash_bank *bank, const uint8_t *buffer,
                                     uint32_t address, uint32_t words_count)
 {
     int64_t write_block_start = timeval_ms();
-    // log_info("%s", __func__);
-    struct target *target = bank->target;
-    int retval = 0;
+    
+    uint32_t retval = ERROR_OK;
+    uint32_t all = words_count*4;
     uint32_t total_bytes = words_count*4;
-    uint32_t func = 1;
-    while (words_count > 0)
-    {
-        uint32_t thisrun_words = fls_algo_params.g_rwBuffer_size / 4;
+    // log_info("%s", __func__);
+    if (address>fls_algo_params.cached_sector_addr[0] && address<(fls_algo_params.cached_sector_addr[0]+SECTOR_SIZE)) {
+        // log_info("first need padding addr %08X", address);
+        uint32_t padd_len=address%SECTOR_SIZE;
+        memcpy(fls_algo_params.cached_sector[0]+padd_len, buffer, (SECTOR_SIZE - padd_len));
+        cw32_fls_algo_write(bank, fls_algo_params.cached_sector[0], fls_algo_params.cached_sector_addr[0], SECTOR_SIZE);
 
-        /* Limit to the amount of data we actually want to write */
-        if (thisrun_words > words_count)
-            thisrun_words = words_count;
-
-        /* Write data to buffer */
-        uint32_t len = thisrun_words * 4;
-        // int64_t write_data_start = timeval_ms();
-        retval = target_write_buffer(target, fls_algo_params.g_rwBuffer&0xFFFFFFFF, len, buffer);
-        // log_info("load program data %" PRId64 " ms.[0x%X bytes]", timeval_ms() - write_data_start, len);
-        if (retval != ERROR_OK)
-            break;
-
-        // write_data_start = timeval_ms();
-        retval = target_write_buffer(target, fls_algo_params.g_func&0xFFFFFFFF, 4, &func);
-        retval = target_write_buffer(target, fls_algo_params.g_dstAddress&0xFFFFFFFF, 4, &address);
-        retval = target_write_buffer(target, fls_algo_params.g_length&0xFFFFFFFF, 4, &len);
-        // log_info("load data %" PRId64 " ms.[0x%X bytes]",  timeval_ms() - write_data_start, 4);
-        retval = target_run_algorithm(target,
-                                      0, NULL,
-                                      0, NULL,
-                                      fls_algo_params.__bkpt_label+2,
-                                      fls_algo_params.__bkpt_label,
-                                      10000, NULL);
-        // log_info("run program algo %" PRId64 " ms.", timeval_ms() - write_data_start);
-        // uint32_t res[1] = {0};
-        // target_read_buffer(target, fls_algo_params.g_error, sizeof(res), res);
-        // log_info("run fls program algorithm res %08X.", res[0]);
-        
-        // uint8_t bbb[0x5000] = {0};
-        // target_read_buffer(target,address, len, bbb);
-        // log_hex("check fls data",  bbb, 0x10);
-
-        // if (memcmp(buffer, bbb, len)!=0) {
-        // 	return ERROR_FAIL;
-        // }
-
-        if (retval != ERROR_OK)
-        {
-            LOG_ERROR("Failed to execute algorithm at 0x%" PRIx32 ": %"PRId32"",
-                      address, retval);
+        buffer += (SECTOR_SIZE - padd_len);
+        address += (SECTOR_SIZE - padd_len);
+        total_bytes -= (SECTOR_SIZE - padd_len);
+    }
+    
+    for ( ; total_bytes>0; total_bytes-=fls_algo_params.g_rwBuffer_size) {
+        if (total_bytes>=fls_algo_params.g_rwBuffer_size) {
+            cw32_fls_algo_write(bank, buffer, address, fls_algo_params.g_rwBuffer_size);
+            address+=fls_algo_params.g_rwBuffer_size;
+            buffer+=fls_algo_params.g_rwBuffer_size;
+        }
+        else {
+            uint32_t curr_len = total_bytes-total_bytes%SECTOR_SIZE;
+            cw32_fls_algo_write(bank, buffer, address, curr_len);
+            address+=curr_len;
+            buffer+=curr_len;
+            total_bytes -= curr_len;
             break;
         }
-
-        /* Update counters */
-        buffer += thisrun_words * 4;
-        address += thisrun_words * 4;
-        words_count -= thisrun_words;
     }
-    log_info("write block %" PRId64 " ms.[0x%X bytes]", timeval_ms() - write_block_start, total_bytes);
+
+    if (total_bytes>0) {
+        if (address == fls_algo_params.cached_sector_addr[1]) {
+            // log_info("last need padding addr %08X", address);
+            uint8_t* new_buffer = malloc(SECTOR_SIZE);
+            // uint32_t padd_len=address%SECTOR_SIZE;
+            memcpy(new_buffer, buffer, total_bytes);
+            memcpy(new_buffer+total_bytes, fls_algo_params.cached_sector[1]+total_bytes, (SECTOR_SIZE - total_bytes));
+            cw32_fls_algo_write(bank, new_buffer, address, SECTOR_SIZE);
+        }
+        else {
+            cw32_fls_algo_write(bank, buffer, address, total_bytes);
+        }
+    }
+
+    log_info("write block %" PRId64 " ms.[0x%X bytes]", timeval_ms() - write_block_start, all);
 
     return retval;
 }
@@ -230,8 +261,10 @@ static int cw32_write_block(struct flash_bank *bank,
      * The flash infrastructure ensures it, do just a security check
      */
     assert(address % 4 == 0);
-    uint32_t flashIndex = (address >= 0x01080000 ? flash_index : 2);
-    target_write_buffer(target, fls_algo_params.g_flashIndex&0xFFFFFFFF, 4, &flashIndex);
+    if (fls_algo_params.g_flashIndex != 0) {
+        uint32_t flashIndex = (address >= 0x01080000 ? flash_index : 2);
+        target_write_buffer(target, fls_algo_params.g_flashIndex, 4, &flashIndex);
+    }
 
     int retval;
     retval = cw32_write_block_riscv(bank, buffer, address, words_count);
@@ -387,175 +420,132 @@ COMMAND_HANDLER(cw32_handle_set_flash_index_command)
 
 #include <target/image.h>
 #include <helper/configuration.h>
-static int cw32_load_rom(struct flash_bank *bank)
+
+static int cw32_load_elf(struct flash_bank *bank, char *path, struct image *image)
 {
-    struct target *target = bank->target;
+    int retval = ERROR_FAIL;
+    char *full_path = find_file(path);
+    if (full_path != NULL) {
+        retval = image_open(image, full_path, "elf");
+        if (retval == ERROR_OK) {
+            uint32_t image_size = 0;
+            struct duration bench;
+            duration_start(&bench);
+            // log_info("%s : section cnt %u",full_path, image->num_sections);
+            for (unsigned int i = 0; i < image->num_sections; i++) {
 
-    int retval = ERROR_OK;
+                struct imagesection *section = &image->sections[i];
+                // log_info("section[%d] addr 0x%08x size %u", i, (uint32_t)section->base_address, section->size);
 
-    struct image image = {.base_address_set = false};
+                uint8_t *buffer = malloc(section->size);
+                if (!buffer) {
+                    retval = ERROR_FAIL;
+                    break;
+                }
 
-    if (retval == ERROR_OK)
-    {
-        char rom_path[100] = {0};
-        sprintf(rom_path, "../cw_fls_algo/%s_rom.elf\n", bank->driver->name);
-        char *full_path = find_file(rom_path);
-        if (full_path == NULL) 
+                uint8_t *read_buffer = malloc(section->size);
+                if (!buffer) {
+                    retval = ERROR_FAIL;
+                    break;
+                }
+
+                size_t buf_cnt;
+                retval = image_read_section(image, i, 0x0, section->size, buffer, &buf_cnt);
+                if (retval != ERROR_OK) {
+                    free(buffer);
+                    break;
+                }
+
+                retval = target_read_buffer(bank->target, (uint32_t)section->base_address, 0x80, read_buffer);
+                if (memcmp(read_buffer, buffer, 0x10)==0) {
+                    retval = ERROR_OK;
+                    return retval;
+                    break;
+                }
+
+                retval = target_write_buffer(bank->target, (uint32_t)section->base_address,buf_cnt, buffer);
+                free(buffer);
+                if (retval != ERROR_OK)
+                    break;
+
+                image_size += buf_cnt;
+            }
+            duration_measure(&bench);
+            float time = duration_elapsed(&bench);
+            float speed = duration_kbps(&bench, image_size);
+            log_info("load %s %u bytes in %fs (%0.3f KiB/s)", path, image_size, time, speed);
+        }
+        else 
         {
-            LOG_ERROR("Cannot find %s", rom_path);
-            return ERROR_FAIL;
-        };
-        retval = image_open(&image, full_path, "elf");
+            // log_info("%s open failed", full_path);
+        }
         free(full_path);
     }
-
-    struct duration bench;
-    duration_start(&bench);
-
-    uint32_t image_size = 0;
-    for (unsigned int i = 0; i < image.num_sections; i++) {
-
-        struct imagesection *section = &image.sections[i];
-        log_info("section[%d] addr 0x%08x size %u", i, (uint32_t)section->base_address, section->size);
-
-        uint8_t *buffer = malloc(section->size);
-        if (!buffer) {
-            retval = ERROR_FAIL;
-            break;
-        }
-
-        size_t buf_cnt;
-        retval = image_read_section(&image, i, 0x0, section->size, buffer, &buf_cnt);
-        if (retval != ERROR_OK) {
-            free(buffer);
-            break;
-        }
-
-        retval = target_write_buffer(target, (uint32_t)section->base_address,buf_cnt, buffer);
-        free(buffer);
-        if (retval != ERROR_OK)
-            break;
-
-        image_size += buf_cnt;
+    else
+    {
+        // log_info("file %s not find", path);
     }
+    return retval;
+}
 
-    if ((retval == ERROR_OK) && (duration_measure(&bench) == ERROR_OK)) {
-        log_info("load rom code %" PRIu32 " bytes "
-                "in %fs (%0.3f KiB/s)", image_size,
-                duration_elapsed(&bench), duration_kbps(&bench, image_size));
+static int cw32_load_rom(struct flash_bank *bank)
+{
+    // log_info("%s", __func__);
+    int retval = ERROR_OK;
+    struct image image = {.base_address_set = false};
+    char rom_path[100] = {0};
+    sprintf(rom_path, "../cw_fls_algo/%s_rom.elf", bank->driver->name);
+
+    retval = cw32_load_elf(bank, rom_path, &image);
+    if (retval == ERROR_OK) {
+        image_close(&image);
     }
-
-    image_close(&image);
 
     return retval;
 }
 
+extern int image_find_symbol(struct image *image, const char *symbol_name, uint32_t *address, uint32_t *size);
 static int cw32_load_fls_algo(struct flash_bank *bank)
 {
     cw32_load_rom(bank);
+    // log_info("%s", __func__);
 
     struct target *target = bank->target;
 
     int retval = 0;
-    char rom_path[100] = {0};
-    sprintf(rom_path, "../cw_fls_algo/%s_flash_algo.elf\n", bank->driver->name);
-    char *full_path = find_file(rom_path);
-    if (full_path == NULL) 
-    {
-        LOG_ERROR("Cannot find %s", rom_path);
-        return ERROR_FAIL;
-    }
+    uint32_t size = 0;
+    struct image image = {.base_address_set = false};
+    char alhgo_path[100] = {0};
+    sprintf(alhgo_path, "../cw_fls_algo/%s_flash_algo.elf", bank->driver->name);
 
-    log_info("load fls algo %s", full_path);
-    full_path = find_file(full_path);
-    if (full_path == NULL) 
-    {
-        LOG_ERROR("Cannot find %s", full_path);
-        return ERROR_FAIL;
-    }
-    
-    struct image image = {0};
-    uint32_t size;
-    
-    retval = image_open(&image, full_path, "elf");
-    log_info("image_open ret %d, num_sections %d", retval, image.num_sections);
-    if (retval != ERROR_OK) {
-        LOG_ERROR("Failed to open image %s", full_path);
-        free(full_path);
-        return retval;
-    }
-    if (image.num_sections == 0) {
-        LOG_ERROR("No loadable segments in %s", full_path);
+    retval = cw32_load_elf(bank, alhgo_path, &image);
+    if (retval == ERROR_OK) {
+        retval = image_find_symbol(&image, "Reset_Handler", &fls_algo_params.start_addr,  &size);
+        // log_info("Symbol '%s' found at address: 0x%08x size %d", "Reset_Handler", fls_algo_params.start_addr,  size);
+        retval = image_find_symbol(&image, "__bkpt_label", &fls_algo_params.__bkpt_label,  &size);
+        // log_info("Symbol '%s' found at address: 0x%08x size %d", "__bkpt_label", fls_algo_params.__bkpt_label,  size);
+        retval = image_find_symbol(&image, "g_rwBuffer", &fls_algo_params.g_rwBuffer,  &fls_algo_params.g_rwBuffer_size);
+        // log_info("Symbol '%s' found at address: 0x%08x size %d", "g_rwBuffer", fls_algo_params.g_rwBuffer,  fls_algo_params.g_rwBuffer_size);
+        retval = image_find_symbol(&image, "g_dstAddress", &fls_algo_params.g_dstAddress,  &size);
+        // log_info("Symbol '%s' found at address: 0x%08x size %d", "g_dstAddress", fls_algo_params.g_dstAddress,  size);
+        retval = image_find_symbol(&image, "g_length", &fls_algo_params.g_length,  &size);
+        // log_info("Symbol '%s' found at address: 0x%08x size %d", "g_length", fls_algo_params.g_length,  size);
+        retval = image_find_symbol(&image, "g_func", &fls_algo_params.g_func,  &size);
+        // log_info("Symbol '%s' found at address: 0x%08x size %d", "g_func", fls_algo_params.g_func,  size);
+        retval = image_find_symbol(&image, "g_flashIndex", &fls_algo_params.g_flashIndex,  &size);
+        // log_info("Symbol '%s' found at address: 0x%08x size %d", "g_flashIndex", fls_algo_params.g_flashIndex,  size);
+        retval = image_find_symbol(&image, "g_error", &fls_algo_params.g_error,  &size);
+        // log_info("Symbol '%s' found at address: 0x%08x size %d", "g_error", fls_algo_params.g_error,  size);
+
+        retval = target_run_algorithm(target,
+                                    0, NULL,
+                                    0, NULL,
+                                    fls_algo_params.start_addr,
+                                    fls_algo_params.__bkpt_label,
+                                    100, NULL);
+
         image_close(&image);
-        free(full_path);
-        return ERROR_FAIL;
     }
-
-extern int image_find_symbol(struct image *image, const char *symbol_name, 
-                                uint32_t *address, uint32_t *size);
-    retval = image_find_symbol(&image, "Reset_Handler", &fls_algo_params.start_addr,  &size);
-    log_info("Symbol '%s' found at address: 0x%08x size %d", "Reset_Handler", fls_algo_params.start_addr,  size);
-    retval = image_find_symbol(&image, "__bkpt_label", &fls_algo_params.__bkpt_label,  &size);
-    log_info("Symbol '%s' found at address: 0x%08x size %d", "__bkpt_label", fls_algo_params.__bkpt_label,  size);
-    retval = image_find_symbol(&image, "g_rwBuffer", &fls_algo_params.g_rwBuffer,  &fls_algo_params.g_rwBuffer_size);
-    log_info("Symbol '%s' found at address: 0x%08x size %d", "g_rwBuffer", fls_algo_params.g_rwBuffer,  fls_algo_params.g_rwBuffer_size);
-    retval = image_find_symbol(&image, "g_dstAddress", &fls_algo_params.g_dstAddress,  &size);
-    log_info("Symbol '%s' found at address: 0x%08x size %d", "g_dstAddress", fls_algo_params.g_dstAddress,  size);
-    retval = image_find_symbol(&image, "g_length", &fls_algo_params.g_length,  &size);
-    log_info("Symbol '%s' found at address: 0x%08x size %d", "g_length", fls_algo_params.g_length,  size);
-    retval = image_find_symbol(&image, "g_func", &fls_algo_params.g_func,  &size);
-    log_info("Symbol '%s' found at address: 0x%08x size %d", "g_func", fls_algo_params.g_func,  size);
-    retval = image_find_symbol(&image, "g_flashIndex", &fls_algo_params.g_flashIndex,  &size);
-    log_info("Symbol '%s' found at address: 0x%08x size %d", "g_flashIndex", fls_algo_params.g_flashIndex,  size);
-    retval = image_find_symbol(&image, "g_error", &fls_algo_params.g_error,  &size);
-    log_info("Symbol '%s' found at address: 0x%08x size %d", "g_error", fls_algo_params.g_error,  size);
-
-    struct duration bench;
-    duration_start(&bench);
-
-    retval = ERROR_OK;
-    uint32_t image_size = 0;
-    for (unsigned int i = 0; i < image.num_sections; i++) {
-        struct imagesection *section = &image.sections[i];
-        log_info("section[%d] addr 0x%08x size %u", i,
-            (uint32_t)section->base_address, section->size);
-
-        uint8_t *buffer = malloc(section->size);
-        if (!buffer) {
-            retval = ERROR_FAIL;
-            break;
-        }
-
-        size_t buf_cnt;
-        retval = image_read_section(&image, i, 0x0, section->size, buffer, &buf_cnt);
-        if (retval != ERROR_OK) {
-            free(buffer);
-            break;
-        }
-
-        retval = target_write_buffer(target, (uint32_t)section->base_address,
-            buf_cnt, buffer);
-        free(buffer);
-        if (retval != ERROR_OK)
-            break;
-
-        image_size += buf_cnt;
-    }
-
-    if ((retval == ERROR_OK) && (duration_measure(&bench) == ERROR_OK)) {
-        log_info("load flash algo %" PRIu32 " bytes "
-                "in %fs (%0.3f KiB/s)", image_size,
-                duration_elapsed(&bench), duration_kbps(&bench, image_size));
-    }
-    
-    retval = target_run_algorithm(target,
-                                  0, NULL,
-                                  0, NULL,
-                                  fls_algo_params.start_addr,
-                                  fls_algo_params.__bkpt_label,
-                                  10000, NULL);
-
-    image_close(&image);
 
     return retval;
 }
