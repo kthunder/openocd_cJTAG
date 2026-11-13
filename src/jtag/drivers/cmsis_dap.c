@@ -86,6 +86,13 @@ static int cmsis_dap_backend = -1;
 static bool swd_mode;
 static bool cmsis_dap_quirk_mode;  /* enable expensive workarounds */
 
+/* Deferred vendor settings.  The interface script runs before 'init', so the
+ * "open-dap" commands only record the request here; the vendor commands are
+ * sent from cmsis_dap_init() once the adapter is open. */
+static bool open_dap_want_cjtag;
+static bool open_dap_want_rvswd;
+static uint32_t open_dap_ref_mv;
+
 /* CMSIS-DAP General Commands */
 #define CMD_DAP_INFO              0x00
 #define CMD_DAP_LED               0x01
@@ -267,6 +274,12 @@ static struct cmsis_dap *cmsis_dap_handle;
 
 
 static int cmsis_dap_quit(void);
+
+/* Defined at the bottom of this file and installed into adapter_patch by
+ * cmsis_dap_init(). */
+static int cmsis_dap_rvswd_reset(void);
+static int cmsis_dap_rvswd_dmi_read(uint8_t address, uint32_t *value);
+static int cmsis_dap_rvswd_dmi_write(uint8_t address, uint32_t value);
 
 static int cmsis_dap_open(void)
 {
@@ -1363,6 +1376,12 @@ static int cmsis_dap_init(void)
 		LOG_INFO("CMSIS-DAP: Interface Initialised (JTAG)");
 	}
 
+	if (open_dap_want_cjtag && open_dap_want_rvswd) {
+		LOG_ERROR("CMSIS-DAP: \"cjtag\" and \"rvswd\" are mutually exclusive");
+		retval = ERROR_COMMAND_SYNTAX_ERROR;
+		goto init_err;
+	}
+
 	/* Be conservative and suppress submitting multiple HID requests
 	 * until we get packet count info from the adaptor */
 	cmsis_dap_handle->packet_count = 1;
@@ -1459,6 +1478,53 @@ static int cmsis_dap_init(void)
 			LOG_INFO("Connecting under reset");
 		}
 	}
+
+	/* Apply the vendor settings recorded before 'init' by the "open-dap"
+	 * subcommands.  Both blocks are skipped unless the command was used. */
+	if (open_dap_ref_mv) {
+		uint32_t mv = open_dap_ref_mv;
+		if (mv > 3300)
+			mv = 3300;
+		if (mv < 1500)
+			mv = 1500;
+
+		uint8_t *command = cmsis_dap_handle->command;
+		command[0] = 0x9D;
+		command[1] = mv / 100;
+		retval = cmsis_dap_xfer(cmsis_dap_handle, 2);
+		if (retval != ERROR_OK || cmsis_dap_handle->response[1] != DAP_OK)
+			goto init_err;
+		LOG_INFO("CMSIS-DAP: set vref %" PRIu32 " mv", mv);
+	}
+
+	if (open_dap_want_cjtag) {
+		uint8_t *command = cmsis_dap_handle->command;
+		command[0] = 0x9F;
+		command[1] = 1;
+		retval = cmsis_dap_xfer(cmsis_dap_handle, 2);
+		if (retval != ERROR_OK || cmsis_dap_handle->response[1] != DAP_OK)
+			goto init_err;
+		LOG_INFO("CMSIS-DAP: enable cjtag");
+	}
+
+	/* The two modes are mutually exclusive: cJTAG still talks to a TAP (over
+	 * two wires), while RVSWD bypasses the TAP entirely. */
+
+	/* cJTAG: the TAP sits behind an IEEE 1149.7 bridge. */
+	if (open_dap_want_cjtag) {
+		adapter_patch.name     = "open-dap";
+		adapter_patch.cjtag_en = true;
+	}
+
+	/* RVSWD: the debug module is reached directly, without JTAG scans. */
+	if (open_dap_want_rvswd) {
+		adapter_patch.name     = "open-dap";
+		adapter_patch.rvswd_en = true;
+		adapter_patch.reset    = cmsis_dap_rvswd_reset;
+		adapter_patch.read     = cmsis_dap_rvswd_dmi_read;
+		adapter_patch.write    = cmsis_dap_rvswd_dmi_write;
+	}
+
 	LOG_INFO("CMSIS-DAP: Interface ready");
 	return ERROR_OK;
 
@@ -2257,6 +2323,31 @@ COMMAND_HANDLER(cmsis_dap_handle_quirk_command)
 	return ERROR_OK;
 }
 
+
+/* Only record the request: it is sent by cmsis_dap_init(). */
+COMMAND_HANDLER(cmsis_dap_handle_cjtag_command)
+{
+	open_dap_want_cjtag = true;
+	return ERROR_OK;
+}
+
+/* Only record the request: honoured by cmsis_dap_init(). */
+COMMAND_HANDLER(cmsis_dap_handle_rvswd_command)
+{
+	open_dap_want_rvswd = true;
+	return ERROR_OK;
+}
+
+/* Only record the request: it is sent by cmsis_dap_init(). */
+COMMAND_HANDLER(cmsis_dap_handle_vref_command)
+{
+	if (CMD_ARGC != 1)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	COMMAND_PARSE_NUMBER(uint, CMD_ARGV[0], open_dap_ref_mv);
+	return ERROR_OK;
+}
+
 static const struct command_registration cmsis_dap_subcommand_handlers[] = {
 	{
 		.name = "info",
@@ -2311,6 +2402,27 @@ static const struct command_registration cmsis_dap_subcommand_handlers[] = {
 		.usage = "<cmd>",
 	},
 #endif
+	{
+		.name = "cjtag",
+		.handler = &cmsis_dap_handle_cjtag_command,
+		.mode = COMMAND_ANY,
+		.help = "put the target TAP in IEEE 1149.7 (cJTAG) mode",
+		.usage = "",
+	},
+	{
+		.name = "vref",
+		.handler = &cmsis_dap_handle_vref_command,
+		.mode = COMMAND_ANY,
+		.help = "set the target I/O reference voltage in millivolt",
+		.usage = "<millivolt>",
+	},
+	{
+		.name = "rvswd",
+		.handler = &cmsis_dap_handle_rvswd_command,
+		.mode = COMMAND_ANY,
+		.help = "access the RISC-V debug module over the two-wire RVSWD link",
+		.usage = "",
+	},
 	COMMAND_REGISTRATION_DONE
 };
 
@@ -2357,3 +2469,93 @@ struct adapter_driver cmsis_dap_adapter_driver = {
 	.jtag_ops = &cmsis_dap_interface,
 	.swd_ops = &cmsis_dap_swd_driver,
 };
+/* WCH RVSWD vendor commands, implemented by the CherryDAP firmware
+ * (see DAP_vendor.c: ID_DAP_Vendor26/27/28, i.e. 0x9a/0x9b/0x9c).
+ * These give raw access to the RISC-V debug module over the proprietary
+ * two-wire RVSWD protocol used by WCH CH32/WCH32 parts.
+ */
+#define CMD_DAP_RVSWD_RESET       0x9a   /* ID_DAP_Vendor26: reset/wakeup */
+#define CMD_DAP_RVSWD_DMI_WRITE   0x9b   /* ID_DAP_Vendor27: addr + value */
+#define CMD_DAP_RVSWD_DMI_READ    0x9c   /* ID_DAP_Vendor28: addr -> value */
+
+/* Send a WCH RVSWD vendor command and return the adapter's status byte.
+ *
+ * The vendor responses are laid out as: [command_id][DAP status][payload...].
+ */
+static int cmsis_dap_rvswd_vendor_cmd(const uint8_t *cmd, int cmd_len,
+		uint8_t **resp_out)
+{
+	if (!cmsis_dap_handle) {
+		LOG_ERROR("CMSIS-DAP: adapter not initialized");
+		return ERROR_FAIL;
+	}
+
+	uint8_t *command = cmsis_dap_handle->command;
+	memcpy(command, cmd, cmd_len);
+
+	int retval = cmsis_dap_xfer(cmsis_dap_handle, cmd_len);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("CMSIS-DAP: RVSWD vendor command 0x%02" PRIx8 " failed.", cmd[0]);
+		return ERROR_JTAG_DEVICE_ERROR;
+	}
+
+	uint8_t *resp = cmsis_dap_handle->response;
+	if (resp[1] != DAP_OK) {
+		LOG_ERROR("CMSIS-DAP: RVSWD vendor command 0x%02" PRIx8
+			" returned DAP_ERROR.", cmd[0]);
+		return ERROR_JTAG_DEVICE_ERROR;
+	}
+
+	if (resp_out)
+		*resp_out = resp;
+
+	return ERROR_OK;
+}
+
+/** Reset / wake up the target debug module (WCH RVSWD, DAP vendor command 26).
+ *
+ * Also re-syncs the RVSWD link in the adapter firmware. The debug module is
+ * NOT activated by this, so the next DMI access re-runs the attach sequence.
+ */
+static int cmsis_dap_rvswd_reset(void)
+{
+	uint8_t cmd[1] = { CMD_DAP_RVSWD_RESET };
+
+	return cmsis_dap_rvswd_vendor_cmd(cmd, sizeof(cmd), NULL);
+}
+
+/** Read a 32-bit value from the target debug module over WCH RVSWD
+ * (DAP vendor command 28).
+ *
+ * @param address  Debug module register address (8 bits).
+ * @param value    Receives the value read back.
+ */
+static int cmsis_dap_rvswd_dmi_read(uint8_t address, uint32_t *value)
+{
+	if (!value)
+		return ERROR_COMMAND_SYNTAX_ERROR;
+
+	uint8_t cmd[2] = { CMD_DAP_RVSWD_DMI_READ, address };
+	uint8_t *resp;
+	int retval = cmsis_dap_rvswd_vendor_cmd(cmd, sizeof(cmd), &resp);
+	if (retval != ERROR_OK)
+		return retval;
+
+	*value = le_to_h_u32(&resp[2]);
+
+	return ERROR_OK;
+}
+
+/** Write a 32-bit value to the target debug module over WCH RVSWD
+ * (DAP vendor command 27).
+ *
+ * @param address  Debug module register address (8 bits).
+ * @param value    Value to write.
+ */
+static int cmsis_dap_rvswd_dmi_write(uint8_t address, uint32_t value)
+{
+	uint8_t cmd[6] = { CMD_DAP_RVSWD_DMI_WRITE, address };
+	h_u32_to_le(&cmd[2], value);
+
+	return cmsis_dap_rvswd_vendor_cmd(cmd, sizeof(cmd), NULL);
+}

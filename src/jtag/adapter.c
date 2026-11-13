@@ -75,6 +75,11 @@ bool is_adapter_initialized(void)
 	return adapter_config.adapter_initialized;
 }
 
+/* Filled in by an adapter driver during init() when the generic JTAG layer
+ * cannot assume standard IEEE 1149.1 behaviour; see jtag.h.  Zero-init means
+ * "nothing special", so the flags need no pointer check by consumers. */
+struct adapter_jtag_patch adapter_patch;
+
 /* For convenience of the bit-banging drivers keep the gpio_config drive
  * settings for srst and trst in sync with values set by the "adapter
  * reset_config" command.

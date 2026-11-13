@@ -1231,13 +1231,49 @@ static int jtag_examine_chain(void)
 	int retval;
 	unsigned int max_taps = jtag_tap_count();
 
+    if (adapter_patch.rvswd_en) {
+        /* The adapter reaches the debug module directly, so there is no scan
+         * chain to interrogate.  Build the single TAP that the RISC-V target
+         * needs, and skip the chain scan entirely.
+         *
+         * This function runs again on every "reset", so only inject the TAP
+         * once per process; otherwise each reset would append another
+         * auto*.tap to the global TAP list.
+         */
+        static bool dmi_tap_injected;
+        if (dmi_tap_injected)
+            return ERROR_OK;
+
+        struct jtag_tap *tap = calloc(1, sizeof(*tap));
+        if (!tap)
+            return ERROR_FAIL;
+
+        tap->chip = alloc_printf("auto%u", 0);
+        tap->tapname = strdup("tap");
+        tap->dotted_name = alloc_printf("%s.%s", tap->chip, tap->tapname);
+        tap->ir_length = 5;
+        tap->ir_capture_mask = 0x03;
+        tap->ir_capture_value = 0x01;
+        tap->enabled = true;
+        tap->has_idcode = true;
+        tap->idcode = 0x00000001;
+
+        jtag_tap_init(tap);
+        dmi_tap_injected = true;
+
+        LOG_WARNING("%s: using synthetic TAP %s, IDCODE 0x%08" PRIx32,
+            adapter_patch.name, tap->dotted_name, tap->idcode);
+        return ERROR_OK;
+    }
+
 	/* Autoprobe up to this many. */
 	if (max_taps < JTAG_MAX_AUTO_TAPS)
 		max_taps = JTAG_MAX_AUTO_TAPS;
 
 	/* Add room for end-of-chain marker. */
 	max_taps++;
-
+	if (adapter_patch.cjtag_en)
+		max_taps = 1;
 	uint8_t *idcode_buffer = calloc(4, max_taps);
 	if (!idcode_buffer)
 		return ERROR_JTAG_INIT_FAILED;
@@ -1344,6 +1380,10 @@ out:
  */
 static int jtag_validate_ircapture(void)
 {
+	/* cJTAG needs the escape sequence to be replayed after a TAP reset, and
+	 * a direct DMI link has no TAP at all -- neither can validate IR capture. */
+	if (adapter_patch.cjtag_en || adapter_patch.rvswd_en)
+		return ERROR_OK;
 	struct jtag_tap *tap;
 	uint8_t *ir_test = NULL;
 	struct scan_field field;

@@ -28,6 +28,115 @@ static unsigned int get_dmi_scan_length(const struct target *target)
 	return abits + DTM_DMI_DATA_LENGTH + DTM_DMI_OP_LENGTH;
 }
 
+/* The adapter can reach the debug module directly (e.g. "open-dap rvswd");
+ * see struct adapter_jtag_patch in jtag/jtag.h. */
+
+/** Execute one batch of DMI operations over a direct (non-JTAG) link.
+ *
+ * The adapter firmware speaks the target's two-wire protocol, so no JTAG
+ * IR/DR scans are generated at all. Each queued DMI read/write is handed to
+ * the transport callback, and the reply is synthesised into the *next* scan
+ * field's in_value.
+ *
+ * The one-scan offset is essential: RISC-V's JTAG DMI is pipelined, so the
+ * response to the operation issued in scan N is shifted out during scan N+1.
+ * OpenOCD relies on this:
+ *  - riscv_batch_add_dmi_read() stores the read key as "used_scans" *after*
+ *    incrementing, i.e. pointing at the following scan;
+ *  - riscv_batch_was_scan_busy(scan_idx) inspects fields[scan_idx].in_value,
+ *    which carries the status of the operation issued in scan_idx-1;
+ *  - a batch always ends with a NOP that captures the last real response.
+ * Writing the reply into fields[i] instead would make every dm_read() return
+ * the NOP's data (zero), which e.g. keeps reset_dm() waiting forever for
+ * dmcontrol.dmactive to come back set.
+ */
+static int dmi_run_batch(struct riscv_batch *batch, size_t start_idx)
+{
+	const unsigned int abits = riscv_get_dmi_address_bits(batch->target);
+
+	/* The adapter firmware activates the target debug module lazily, on its
+	 * first DMI access, and caches that fact in a static variable of its own
+	 * which only the "wakeup" vendor command clears. Since OpenOCD can be
+	 * restarted while the adapter keeps running, that cache may claim "ready"
+	 * while the target has meanwhile lost power or been reset -- every DMI
+	 * access then fails. Re-sync the link once per OpenOCD run before the
+	 * first real access.
+	 */
+	static bool link_synced;
+	if (!link_synced) {
+		if (adapter_patch.reset() != ERROR_OK) {
+			LOG_ERROR("%s: could not wake up the target debug module",
+					adapter_patch.name);
+			return ERROR_FAIL;
+		}
+		link_synced = true;
+		LOG_DEBUG("%s: target debug module woken up", adapter_patch.name);
+	}
+
+	for (size_t i = start_idx; i < batch->used_scans; ++i) {
+		struct scan_field *field = batch->fields + i;
+		assert(field->out_value);
+
+		const unsigned int op = buf_get_u32(field->out_value,
+				DTM_DMI_OP_OFFSET, DTM_DMI_OP_LENGTH);
+		const uint32_t data = buf_get_u32(field->out_value,
+				DTM_DMI_DATA_OFFSET, DTM_DMI_DATA_LENGTH);
+		const uint32_t address = buf_get_u32(field->out_value,
+				DTM_DMI_ADDRESS_OFFSET, abits);
+
+		uint32_t reply_data = data;
+
+		switch (op) {
+		case DTM_DMI_OP_WRITE:
+			if (adapter_patch.write((uint8_t)address, data) != ERROR_OK) {
+				/* Retry once after re-syncing the link. */
+				if (adapter_patch.reset() != ERROR_OK ||
+						adapter_patch.write((uint8_t)address, data) != ERROR_OK) {
+					LOG_TARGET_ERROR(batch->target,
+							"%s: DMI write @0x%02" PRIx32 " failed",
+							adapter_patch.name, address);
+					return ERROR_FAIL;
+				}
+			}
+			break;
+		case DTM_DMI_OP_READ:
+			if (adapter_patch.read((uint8_t)address, &reply_data) != ERROR_OK) {
+				/* Retry once after re-syncing the link. */
+				if (adapter_patch.reset() != ERROR_OK ||
+						adapter_patch.read((uint8_t)address, &reply_data) != ERROR_OK) {
+					LOG_TARGET_ERROR(batch->target,
+							"%s: DMI read @0x%02" PRIx32 " failed",
+							adapter_patch.name, address);
+					return ERROR_FAIL;
+				}
+			}
+			break;
+		default:
+			/* NOP: no bus transaction, just report success. */
+			break;
+		}
+
+		/* The reply to this operation is sampled by the following scan. */
+		if (i + 1 < batch->used_scans) {
+			struct scan_field *next = batch->fields + i + 1;
+			if (next->in_value) {
+				memset(next->in_value, 0, DMI_SCAN_BUF_SIZE);
+				buf_set_u32(next->in_value, DTM_DMI_OP_OFFSET,
+						DTM_DMI_OP_LENGTH, DTM_DMI_OP_SUCCESS);
+				buf_set_u32(next->in_value, DTM_DMI_DATA_OFFSET,
+						DTM_DMI_DATA_LENGTH, reply_data);
+				buf_set_u32(next->in_value, DTM_DMI_ADDRESS_OFFSET,
+						abits, address);
+			}
+		}
+	}
+
+	keep_alive();
+	batch->was_run = true;
+	batch->last_scan_delay = 0;
+	return ERROR_OK;
+}
+
 struct riscv_batch *riscv_batch_alloc(struct target *target, size_t scans)
 {
 	scans += BATCH_RESERVED_SCANS;
@@ -290,6 +399,9 @@ int riscv_batch_run_from(struct riscv_batch *batch, size_t start_idx,
 
 	LOG_TARGET_DEBUG(batch->target, "Running batch of scans [%zu, %zu)",
 			start_idx, batch->used_scans);
+
+	if (adapter_patch.rvswd_en)
+		return dmi_run_batch(batch, start_idx);
 
 	unsigned int delay = 0 /* to silence maybe-uninitialized */;
 	for (size_t i = start_idx; i < batch->used_scans; ++i) {

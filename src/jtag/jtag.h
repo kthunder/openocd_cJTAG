@@ -598,6 +598,33 @@ bool jtag_poll_mask(void);
  */
 void jtag_poll_unmask(bool saved);
 
+/**
+ * Adapter-specific adjustments to standard IEEE 1149.1 behaviour.
+ *
+ * Some adapters cannot talk to the target the normal way: either the TAP
+ * sits behind an IEEE 1149.7 (cJTAG) bridge, or the debug module is
+ * reachable directly without any JTAG scan at all.  An adapter driver fills
+ * this in during init(); it is zero-initialised ("nothing special"), so
+ * consumers need no pointer check.
+ */
+struct adapter_jtag_patch {
+	/** Adapter name, for logging. */
+	const char *name;
+	/** TAP is behind a cJTAG bridge: no chain interrogation, no IR validation. */
+	bool cjtag_en;
+	/** Debug module is reached directly, without JTAG scans. */
+	bool rvswd_en;
+	/** Re-synchronize the direct link and wake up the debug module. */
+	int (*reset)(void);
+	/** Read a 32-bit debug module register. */
+	int (*read)(uint8_t address, uint32_t *value);
+	/** Write a 32-bit debug module register. */
+	int (*write)(uint8_t address, uint32_t value);
+};
+
+/** Zero-initialised, so every flag is off and every callback is NULL. */
+extern struct adapter_jtag_patch adapter_patch;
+
 #include <jtag/minidriver.h>
 
 __COMMAND_HANDLER(handle_jtag_newtap);

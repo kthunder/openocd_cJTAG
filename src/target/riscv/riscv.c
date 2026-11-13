@@ -417,6 +417,19 @@ int dtmcs_scan(struct jtag_tap *tap, uint32_t out, uint32_t *in_ptr)
 {
 	uint8_t value[4];
 
+	/* The adapter reaches the debug module directly, so there is no DTM to
+	 * scan.  Report a fixed DTMCS value instead of touching the hardware:
+	 * 0x71 = version 1 (0.13/1.0), abits 7, dmistat 0, idle 0.
+	 */
+	if (adapter_patch.rvswd_en) {
+		const uint32_t fake_dtmcs = 0x71;
+		if (in_ptr)
+			*in_ptr = fake_dtmcs;
+		LOG_DEBUG("%s: fake DTMCS 0x%" PRIx32,
+				adapter_patch.name, fake_dtmcs);
+		return ERROR_OK;
+	}
+
 	if (bscan_tunnel_ir_width != 0)
 		return dtmcs_scan_via_bscan(tap, out, in_ptr);
 
@@ -879,8 +892,20 @@ static int set_trigger(struct target *target, unsigned int idx, riscv_reg_t tdat
 	 * For mcontrol triggers, we don't care about
 	 * the value in the read-only "maskmax" field.
 	 */
-	const riscv_reg_t tdata1_ignore_mask = is_mcontrol ? CSR_MCONTROL_MASKMAX(riscv_xlen(target)) : 0;
-	const bool tdata1_config_denied = (tdata1 & ~tdata1_ignore_mask) != (tdata1_rb & ~tdata1_ignore_mask);
+	riscv_reg_t tdata1_ignore_mask = is_mcontrol ? CSR_MCONTROL_MASKMAX(riscv_xlen(target)) : 0;
+	bool tdata1_config_denied = (tdata1 & ~tdata1_ignore_mask) != (tdata1_rb & ~tdata1_ignore_mask);
+
+	if (tdata1_config_denied && is_mcontrol) {
+		const riscv_reg_t dmode = CSR_MCONTROL_DMODE(riscv_xlen(target));
+		const riscv_reg_t relaxed_mask = tdata1_ignore_mask | dmode;
+		if ((tdata1 & ~relaxed_mask) == (tdata1_rb & ~relaxed_mask)) {
+			LOG_TARGET_DEBUG(target, "Trigger %u dropped dmode on write-back "
+					"(0x%" PRIx64 " -> 0x%" PRIx64 "), accepting it anyway.",
+					idx, tdata1, tdata1_rb);
+			tdata1_ignore_mask = relaxed_mask;
+			tdata1_config_denied = false;
+		}
+	}
 
 	/* Determine if tdata1.maxmask is sufficient
 	 * (only relevant for mcontrol triggers and NAPOT match type)
@@ -6163,10 +6188,14 @@ static int get_trigger_types(struct target *target, unsigned int *trigger_tinfo,
 	if (riscv_reg_get(target, &tinfo, GDB_REGNO_TINFO) == ERROR_OK) {
 		/* tinfo.INFO == 1: trigger doesn’t exist
 		 * tinfo == 0 or tinfo.INFO != 1 and tinfo LSB is set: invalid tinfo */
-		if (tinfo == 0 || tinfo & 0x1)
+		if (tinfo == 0) {
+			LOG_TARGET_DEBUG(target, "tinfo reads 0, deriving trigger types from tdata1.");
+		} else if (tinfo & 0x1) {
 			return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
-		*trigger_tinfo = tinfo;
-		return ERROR_OK;
+		} else {
+			*trigger_tinfo = tinfo;
+			return ERROR_OK;
+		}
 	}
 	const unsigned int type = get_field(tdata1, CSR_TDATA1_TYPE(riscv_xlen(target)));
 	if (type == 0)

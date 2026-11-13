@@ -5468,7 +5468,7 @@ static int riscv013_on_step_or_resume(struct target *target, bool step)
 {
 	if (has_sufficient_progbuf(target, 2))
 		if (execute_autofence(target) != ERROR_OK)
-			return ERROR_FAIL;
+			LOG_TARGET_WARNING(target, "autofence failed, continuing anyway");
 
 	if (set_dcsr_ebreak(target, step) != ERROR_OK)
 		return ERROR_FAIL;
